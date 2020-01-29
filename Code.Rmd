@@ -1,0 +1,452 @@
+---
+title: "Random Forest Classification for SKU outlier"
+author: Yiran Quan
+output: pdf_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+ 
+#use outlier2 as response variable to do random forest classificaiton
+```{r message=FALSE}
+## Import the data
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(lattice)
+library(e1071)
+library(ranger)
+```
+
+
+```{r}
+#import the dataset
+library(readxl)
+sku_data <- read_excel("C:/Users/hirchem/desktop/SKUs_AllCat_AllStates_NewOutlier2.xlsx")
+#delete some variables which have same information with others
+mydata=sku_data
+#transform categorical variables by factor()
+mydata$PacksizeLabel=as.factor(mydata$PacksizeLabel)
+mydata$AvgPricePerVolumeLabel=as.factor(mydata$AvgPricePerVolumeLabel)
+mydata$BrandLabel=as.factor(mydata$BrandLabel)
+mydata$outlier2=as.factor(mydata$outlier2)
+```
+
+## Data splitting
+```{r}
+mydata<-as.data.frame(mydata)
+#create a training(80%) and testing(20%) data split, repeats 3times with different seed
+# Use set.seed for reproducibility
+set.seed(1234)
+train_index <- createDataPartition(mydata$outlier2, p = .8, list = FALSE)
+training <- mydata[ train_index, ]
+testing <- mydata[-train_index, ]
+dim(training)#traning dataset
+dim(testing)#testing dataset
+```
+
+## Imbalanced data
+
+```{r}
+#number of observations for each class
+table(mydata$outlier2)
+```
+
+
+## Build the model with the default parameters
+
+### Weighted random forest
+
+For traditional random forest method, as it is constructed to minimize the overall error rate, it will tend to focus more on the prediction accuracy of the majority class, which often results in poor accuracy for the minority class. For this study, weighted random forest method is applied to learn extremely imbalanced data above, this approach imposes a heavier penalty for misclassifying the minority class by assigning a weight to each class, with the minority class given larger weight(higher misclassification cost),The class weights are incorporated into the RF algorithm in two places:
+
+\begin{enumerate}
+\item Weight the Gini criterion for finding splits.
+\item “Weighted majority vote” in class prediction of each terminal node(i.e.weighted vote of a class is the weight for that class times the number of cases for that class at the terminal node). 
+\end{enumerate}
+
+In this case, classes are weighted inversely proportional to how frequently they appear in the data. Specifically:
+
+$$w_j = \frac{1}{k*n_j}$$
+
+where $w_j$ is the weight to class, $n_j$ is the number of observations in class and $k$ is the total number of classes.
+
+```{r}
+# Create model weights (they sum to one)
+weight5678<- rep(0,length(training$outlier2))
+for (i in 1:length(training$outlier2)){
+   if(training$outlier2[i]==0) {weight5678[i]=1/(3*table(training$outlier2)[1])}
+      else if(training$outlier2[i]==1){weight5678[i]=1/(3*table(training$outlier2)[2])}
+           else {weight5678[i]=1/(3*table(training$outlier2)[3])}
+}
+```
+
+### Performance Measurement
+
+Since accuracy doesn't provide the complete information for predicting classes, other measurements like cohen'kappa and auc is mainly taken in consideration to evaluate the model performance:
+
+\begin{enumerate}
+\item \textbf{Cohen's Kappa Statistic}- which is a very good measure that can handle very well both multi-class and imbalanced class problems. Cohen's kappa is defined as:
+
+$$k = \frac{p_0-p_e}{1-p_e}$$
+
+where $p_0$ is the observed agreement, and $p_e$ is the expected agreement. It basically tells you how much better your classifier is performing over the performance of a classifier that simply guesses at random according to the frequency of each class. Cohen’s kappa is always less than or equal to 1. Values of 0 or less, indicate that the classifier is useless. There is no standardized way to interpret its values. Landis and Koch (1977) provide a way to characterize values. According to their scheme a value < 0 is indicating no agreement , 0–0.20 as slight, 0.21–0.40 as fair, 0.41–0.60 as moderate, 0.61–0.80 as substantial, and 0.81–1 as almost perfect agreement.
+
+\item \textbf{AUC = Area Under the ROC(Receiver Operating Characteristics) curve}- which is commonly used as a baseline to see whether the model is useful. It tells how much model is capable of distinguishing between classes. Higher the AUC, better the model is at predicting class1 as class1 and class2 as class2.
+\end{enumerate}
+
+### model without weight
+
+```{r eval=FALSE}
+#by default, boostrap resampling is used, mtry = sqrt(57), splitrule = "gini",.min.node.size  = 1
+tuneGrid4 <- expand.grid(.mtry = sqrt(57),.splitrule = "gini",.min.node.size  = 1)
+#fit the random forest model
+sku_ranger = train(training[,-1], training$outlier2,
+                method = "ranger",
+                tuneGrid = tuneGrid4,
+                importance = "permutation")
+print(sku_ranger)
+```
+
+```#Output
+  Accuracy   Kappa    
+  0.9844687  0.2681922
+
+Tuning parameter 'mtry' was held constant at a value of 7.54983443527075
+Tuning parameter 'splitrule' was held constant at a value of gini
+Tuning parameter 'min.node.size' was held constant at a value of 1
+```
+
+```{r eval=FALSE}
+#make prediction for testing data set
+outlier2_pred <-predict(sku_ranger,testing)
+#Confusion matrix and Kappa value
+cm=confusionMatrix(table(prediction= outlier2_pred , reference = testing$outlier2))
+cm
+```
+
+```output:
+Confusion Matrix and Statistics
+
+          reference
+prediction    0    1    2
+         0 1831   20    6
+         1    2    1    0
+         2    0    0    3
+
+Overall Statistics
+                                        
+               Accuracy : 0.985         
+                 95% CI : (0.9784, 0.99)
+    No Information Rate : 0.9839        
+    P-Value [Acc > NIR] : 0.4019        
+                                        
+                  Kappa : 0.2191        
+                                        
+ Mcnemar's Test P-Value : NA            
+
+Statistics by Class:
+
+                     Class: 0  Class: 1 Class: 2
+Sensitivity            0.9989 0.0476190 0.333333
+Specificity            0.1333 0.9989142 1.000000
+Pos Pred Value         0.9860 0.3333333 1.000000
+Neg Pred Value         0.6667 0.9892473 0.996774
+Prevalence             0.9839 0.0112721 0.004831
+Detection Rate         0.9828 0.0005368 0.001610
+Detection Prevalence   0.9968 0.0016103 0.001610
+Balanced Accuracy      0.5661 0.5232666 0.666667
+```
+
+```{r eval=FALSE}
+library(pROC)
+outlier2_pred <-predict(sku_ranger,testing)
+outlier2_pred <-as.ordered(outlier2_pred)
+outlier2_roc<-multiclass.roc(response=testing$outlier2, outlier2_pred, levels=levels(as.factor(testing$outlier2)), direction = "<")
+auc(outlier2_roc)
+```
+
+```
+#output: Averaged multi-class area under the curve: 0.6135
+```
+## model with weight
+
+```{r eval=FALSE}
+#by default, boostrap resampling is used, mtry = sqrt(57), splitrule = "gini",.min.node.size  = 1
+tuneGrid4 <- expand.grid(.mtry = sqrt(57),.splitrule = "gini",.min.node.size  = 1)
+#fit the random forest model
+sku_ranger4 = train(training[,-1], training$outlier2,
+                method = "ranger",
+                weights = weight5678,
+                metric = "Kappa",
+                tuneGrid = tuneGrid4,
+                importance = "permutation")
+print(sku_ranger4)
+```
+
+```#output:
+  Accuracy   Kappa    
+  0.9843171  0.4286503
+
+Tuning parameter 'mtry' was held constant at a value of 7.54983443527075
+Tuning parameter 'splitrule' was held constant at a value of gini
+Tuning parameter 'min.node.size' was held constant at a value of 1
+```
+
+
+```{r eval=FALSE}
+#make prediction for testing data set
+outlier2_pred4 <-predict(sku_ranger4,testing)
+#use the prediction to compute the confusion matrix and see the accuracy score
+cm=confusionMatrix(table(prediction= outlier2_pred4 , reference = testing$outlier2))
+cm
+```
+
+```output:
+Confusion Matrix and Statistics
+
+          reference
+prediction    0    1    2
+         0 1823   13    2
+         1    6    8    0
+         2    4    0    7
+
+Overall Statistics
+                                          
+               Accuracy : 0.9866          
+                 95% CI : (0.9803, 0.9913)
+    No Information Rate : 0.9839          
+    P-Value [Acc > NIR] : 0.2063          
+                                          
+                  Kappa : 0.5403          
+                                          
+ Mcnemar's Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: 0 Class: 1 Class: 2
+Sensitivity            0.9945 0.380952 0.777778
+Specificity            0.5000 0.996743 0.997843
+Pos Pred Value         0.9918 0.571429 0.636364
+Neg Pred Value         0.6000 0.992969 0.998920
+Prevalence             0.9839 0.011272 0.004831
+Detection Rate         0.9785 0.004294 0.003757
+Detection Prevalence   0.9866 0.007515 0.005904
+Balanced Accuracy      0.7473 0.688848 0.887810
+```
+
+```{r eval=FALSE}
+library(pROC)
+outlier2_pred4 <-predict(sku_ranger4,testing)
+outlier2_pred4 <-as.ordered(outlier2_pred4)
+outlier2_roc<-multiclass.roc(response=testing$outlier2, outlier2_pred4, levels=levels(as.factor(testing$outlier2)), direction = "<")
+auc(outlier2_roc)
+```
+
+```
+#output: averaged multi-class area under the curve: 0.7668
+
+```
+
+Comments: By comparison random forest and weighed random forest with default parameters, wrf is better since it has higher kappa and auc.
+
+### Parameter tuning:
+
+```{r eval=FALSE}
+#We try a grid of parameters by using the argument "tuneGrid" in funtion "train()" to select the optimal combination of three parameters for the model. Here, grid search mtry from 1 to 10, splitrule= "gini", minimun nodesize=1,3,5
+tuneGrid5 <- expand.grid(.mtry = c(1:10),.splitrule = "gini",.min.node.size  = c(1,3,5))
+trControl = trainControl(method= "repeatedcv" , number = 10, repeats = 5, search = "grid", savePredictions = T)
+sku_ranger_tune5<- train(training[,-1], training$outlier2,
+                 method = "ranger",
+                 weights = weight5678,
+                 metric = "Kappa",
+                 tuneGrid = tuneGrid5,
+                 trControl = trControl,
+                 importance = "permutation")
+```
+
+```{r eval=FALSE}
+print(sku_ranger_tune5)
+plot(sku_ranger_tune5)
+```
+
+```{r eval=FALSE}
+#grid search mtry from 11 to 30, splitrule= "gini", minimun nodesize=1,3,5
+tuneGrid3 <- expand.grid(.mtry = c(11:30),.splitrule = "gini",.min.node.size  = c(1,3,5))
+sku_ranger_tune3<- train(training[,-1], training$outlier2,
+                 method = "ranger",
+                 weights = weight5678,
+                 metric = "Kappa",
+                 tuneGrid = tuneGrid3,
+                 trControl = trControl,
+                 importance = "permutation")
+```
+
+```{r eval=FALSE}
+print(sku_ranger_tune3)
+plot(sku_ranger_tune3)
+```
+
+
+```{r eval=FALSE}
+#grid search mtry from 31 to 30, splitrule= "gini", minimun nodesize=1,3,5
+tuneGrid2 <- expand.grid(.mtry = c(31:50),.splitrule = "gini",.min.node.size  = c(1,3,5))
+sku_ranger_tune2<- train(training[,-1], training$outlier2,
+                 method = "ranger",
+                 weights = weight5678,
+                 metric = "Kappa",
+                 tuneGrid = tuneGrid2,
+                 trControl = trControl,
+                 importance = "permutation")
+```
+
+```{r eval=FALSE}
+print(sku_ranger_tune2)
+plot(sku_ranger_tune2)
+```
+
+```{r eval=FALSE}
+#grid search mtry from 51 to 66, splitrule= "gini", minimun nodesize=1,3,5
+tuneGrid4 <- expand.grid(.mtry = c(51:57),.splitrule = "gini",.min.node.size  = c(1,3,5))
+sku_ranger_tune4<- train(training[,-1], training$outlier2,
+                 method = "ranger",
+                 weights = weight5678,
+                 metric = "Kappa",
+                 tuneGrid = tuneGrid4,
+                 trControl = trControl,
+                 importance = "permutation")
+```
+
+```{r eval=FALSE}
+print(sku_ranger_tune4)
+plot(sku_ranger_tune4)
+```
+
+
+```{r echo=FALSE, eval=FALSE, message= FALSE, warning=FALSE}
+#Plots for parameter tunning:
+t1<-as.data.frame(sku_ranger_tune5$results)
+t2<-as.data.frame(sku_ranger_tune3$results)
+t3<-as.data.frame(sku_ranger_tune2$results)
+t4<-as.data.frame(sku_ranger_tune4$results)
+tune4567<-rbind(t1,t2,t3,t4)
+a<-subset(tune4567, splitrule == "gini", select = c(mtry,splitrule,min.node.size,Accuracy) )
+b<-subset(tune4567, splitrule == "gini", select = c(mtry,splitrule,min.node.size,Kappa))
+a1<-subset(a, min.node.size == 1, select = c(mtry, Accuracy))
+a3<-subset(a, min.node.size == 3, select = c(mtry, Accuracy))
+a5<-subset(a, min.node.size == 5, select = c(mtry, Accuracy))
+b1<-subset(b, min.node.size == 1, select = c(mtry, Kappa))
+b3<-subset(b, min.node.size == 3, select = c(mtry, Kappa))
+b5<-subset(b, min.node.size == 5, select = c(mtry, Kappa))
+#par(mfrow=c(2,2))
+plot(a1$mtry,a1$Accuracy,type='l',col=1,lwd=1,ylab = "Accuracy",xlab= "mtry", main ="Accuracy") 
+lines(a3$mtry,a3$Accuracy,type='l',col=2,lwd=1,ylab = "Accuracy(repeated cross-validation)",xlab= "mtry")
+lines(a5$mtry,a5$Accuracy,type='l',col=3,lwd=1,ylab = "Accuracy(repeated cross-validation)",xlab= "mtry")
+legend('bottomright',legend=c('n_min=1','n_min=3','n_min=5'),col=c(1,2,3),lty=1,bty='n')
+
+plot(b1$mtry,b1$Kappa,type='l',col=1,ylab = "Kappa",xlab= "mtry",main="Cohen's kappa") 
+lines(b3$mtry,b3$Kappa,type='l',col=2,ylab = "Kappa(repeated cross-validation)",xlab= "mtry")
+lines(b5$mtry,b5$Kappa,type='l',col=3,ylab = "Kappa(repeated cross-validation)",xlab= "mtry") 
+legend('bottomright',legend=c('n_min=1','n_min=3','n_min=5'),col=c(1,2,3),lty=1,bty='n')
+
+```
+
+To see the results clearly, we combines all of parameter tuning results togethor:
+
+#![outlier2_varImp](~/Desktop/kappa.jpeg)
+
+
+Comments: Since accuracy doesn't provide the complete information for predicting classes, other measurements like cohen'kappa statistics is treated as performance measure, the highest value of kappa comes from the latter plot and was identified in tunegrid5 when $m_{try}$=10, splitrule = "gini" and $n_{min}$ = 1.
+
+
+## Estimate training accuracy and Kappa statistic
+
+```{r eval=FALSE}
+#training error
+outlier2_pred <-predict(sku_ranger_tune5, training)
+postResample(outlier2_pred, training$outlier2)
+```
+
+```#output:
+ Accuracy     Kappa 
+0.9966479 0.9077478 
+ ```
+
+Comments: The Kappa value of the model with optimal parameters is 0.9077478, which is greatly improved by parameter tuning compared with the model with default parameters' value. This model is extremely better than random guest model.
+
+## Estimate test accuracy and comfusion matrix
+```{r eval=FALSE}
+#make prediction for testing data set
+outlier2_pred1 <-predict(sku_ranger_tune5,testing)
+#use the prediction to compute the confusion matrix and see the accuracy score
+cm=confusionMatrix(table(prediction= outlier2_pred1 , reference = testing$outlier2))
+cm
+```
+
+
+```#output:
+Confusion Matrix and Statistics
+
+          reference
+prediction    0    1    2
+         0 1823    8    3
+         1   10   12    2
+         2    0    1    4
+
+Overall Statistics
+                                          
+               Accuracy : 0.9871          
+                 95% CI : (0.9809, 0.9917)
+    No Information Rate : 0.9839          
+    P-Value [Acc > NIR] : 0.1552          
+                                          
+                  Kappa : 0.5879          
+                                          
+ Mcnemar's Test P-Value : 0.3136          
+
+Statistics by Class:
+
+                     Class: 0 Class: 1 Class: 2
+Sensitivity            0.9945 0.571429 0.444444
+Specificity            0.6333 0.993485 0.999461
+Pos Pred Value         0.9940 0.500000 0.800000
+Neg Pred Value         0.6552 0.995106 0.997309
+Prevalence             0.9839 0.011272 0.004831
+Detection Rate         0.9785 0.006441 0.002147
+Detection Prevalence   0.9844 0.012882 0.002684
+Balanced Accuracy      0.8139 0.782457 0.721953
+```
+
+
+```{r eval=FALSE}
+library(pROC)
+outlier2_pred4 <-predict(sku_ranger_tune5,testing)
+outlier2_pred4 <-as.ordered(outlier2_pred4)
+outlier2_roc<-multiclass.roc(response=testing$outlier2, outlier2_pred4, levels=levels(as.factor(testing$outlier2)), direction = "<")
+auc(outlier2_roc)
+```
+
+```#output: 
+
+Averaged multi-class area under the curve: 0.7931
+
+```
+In this section, the performance of random forest classification model was evaluated by applying it on the test dataset. For the final model, the prediction accuracy is 0.9871 and kappa is 0.5879,  which means this model performance is better than naive classifier with moderate agreement. Also, averaged AUC = 0.7931 demonstrates a great ability for this model to make predictions on SKU outlier2.
+
+## Feature Importance
+
+```{r eval=FALSE}
+outlier2_varImp4<- varImp(sku_ranger_tune5, scale = FALSE)
+outlier2_varImp4
+plot(outlier2_varImp4,top=30)
+```
+
+Permutation importance or \emph{Mean Decrease Accuracy}(MDA) is used by combining with repeated 10-fold cross-validation to calculate the feature importance score for each variable. Here, since resampling method is changed from bootstrap to cross-validation, the OOB samples is replaced by validation set of cross-validation. The cross-validated permutation variable importance is the average of all k-fold permutated variable importances and this process repeats 5 times for more stable results.
+
+#![outlier2_varImp](~/Desktop/var1.jpeg)
+
+#![outlier2_varImpplot](~/Desktop/var2.jpeg)
+
+Comments: The figure only shows the top30 important variables, The top 6 important features are \emph{BrandLabel}, \emph{Number_VariantsofBrand, CatShare_StoresML.mean, Perc_stores_cat_share.mean, Number_SKusOfBrand} and \emph{department_descr}. The important features are likely to appear closer to the root of the tree, while less important features will often appear closed to the leaves.
